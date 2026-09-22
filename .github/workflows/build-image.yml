@@ -1,18 +1,27 @@
 name: Build and Push Image
 
-# Manual only. The image is ~45 GB and the build takes 40-70 minutes, most of
-# it uploading — you don't want this on every push.
+# Builds on every push to main, like the krea2 worker. Doc-only commits are
+# excluded: this image is ~45 GB and a README typo is not worth a rebuild.
 on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+      - "tests/**"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag, e.g. 1.0 -> ghcr.io/<owner>/worker-comfyui:1.0"
-        required: true
-        default: "1.0"
+        description: "Override the image tag (defaults to IMAGE_TAG below)"
+        required: false
         type: string
 
 env:
   REGISTRY: ghcr.io
+  # Change this per model build, alongside the weights in the Dockerfile.
+  # Every build also pushes :latest, so pin each endpoint to its own tag.
+  IMAGE_TAG: wan2.2-i2v
 
 jobs:
   build-and-push:
@@ -59,16 +68,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # No cache-to: type=gha — that cache is capped at 10 GB per repository,
-      # so a 45 GB image would only thrash it.
+      # Runners are ephemeral, so without a cache every build re-downloads
+      # 35 GiB of weights from HuggingFace. cache-from reads the previous
+      # :latest, and type=inline stores the cache metadata in the image itself
+      # rather than as a second 45 GB artifact in the registry. Layers already
+      # in GHCR are skipped on push, so an edit to handler.py (the last layer)
+      # uploads almost nothing.
+      #
+      # No cache-to: type=gha — that cache is capped at 10 GB per repository.
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.tag }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.tag || env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:latest
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:latest
+          cache-to: type=inline
 
       - name: Disk space after build
         if: always()
