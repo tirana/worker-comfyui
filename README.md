@@ -15,8 +15,16 @@ Two differences from upstream:
 
 ## Build
 
-The [`Build and Push Image`](.github/workflows/build-image.yml) workflow builds and pushes to
-GHCR. Manual trigger only — ~45 GB and 40-70 minutes.
+The [`Build and Push Image`](.github/workflows/build-image.yml) workflow builds on every push
+to `main` and pushes to
+[GHCR](https://github.com/tirana/worker-comfyui/pkgs/container/worker-comfyui), tagged
+`wan2.2-i2v` and `latest`. Doc-only commits are skipped via `paths-ignore`; you can also run it
+by hand with a tag override.
+
+A cold build takes about **20 minutes**, nearly all of it fetching the 35 GiB of weights and
+pushing the image. Later builds read the previous `:latest` as a layer cache, and because the
+weights sit below `handler.py` in the Dockerfile, a handler change rebuilds and uploads only
+the final layer.
 
 The resulting package is **private until you change it by hand** in the package settings, and
 RunPod cannot pull it before then. Public also keeps it free of your storage quota.
