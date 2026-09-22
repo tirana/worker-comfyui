@@ -141,7 +141,7 @@ ARG MODEL_TYPE=flux1-dev-fp8
 WORKDIR /comfyui
 
 # Create necessary directories upfront
-RUN mkdir -p models/checkpoints models/vae models/unet models/clip models/text_encoders models/diffusion_models models/model_patches
+RUN mkdir -p models/checkpoints models/vae models/unet models/clip models/text_encoders models/diffusion_models models/model_patches models/loras
 
 # Download checkpoints/vae/unet/clip models to include in image based on model type
 RUN if [ "$MODEL_TYPE" = "sdxl" ]; then \
@@ -179,8 +179,70 @@ RUN if [ "$MODEL_TYPE" = "z-image-turbo" ]; then \
       wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/model_patches/Z-Image-Turbo-Fun-Controlnet-Union.safetensors https://huggingface.co/alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union/resolve/main/Z-Image-Turbo-Fun-Controlnet-Union.safetensors; \
     fi
 
+# Wan 2.2 image-to-video (~35 GiB). One wget per RUN on purpose: each weight
+# becomes its own layer, so a failed download doesn't invalidate the others and
+# BuildKit caches them independently — which matters when the total is this big.
+# The two 14B experts are a mixture-of-experts pair; the workflow needs both.
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      wget -q -O models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors; \
+    fi
+
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      wget -q -O models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors; \
+    fi
+
+# lightx2v distill LoRAs: they are what make 4-step sampling viable, one per expert.
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors && \
+      wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors; \
+    fi
+
+# Wan 2.2 reuses the 2.1 VAE, and its text encoder ships in the 2.1 repackage.
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      wget -q -O models/vae/wan_2.1_vae.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors; \
+    fi
+
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      wget -q -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors; \
+    fi
+
 # Stage 3: Final image
 FROM base AS final
 
+ARG MODEL_TYPE=flux1-dev-fp8
+
 # Copy models from stage 2 to the final image
 COPY --from=downloader /comfyui/models /comfyui/models
+
+# Custom nodes for the Wan 2.2 workflow. These come AFTER the model COPY so that
+# changing the node list doesn't invalidate the 35 GiB layer above.
+#   kjnodes             — ScheduledCFGGuidance, ModelPassThrough, VRAM_Debug,
+#                         DummyOut, INTConstant, FloatConstant
+#   videohelpersuite    — VHS_VideoCombine, the MP4 writer
+#   frame-interpolation — RIFE VFI, which doubles 16fps to 32fps
+# EasyCache is NOT here: it became a core ComfyUI node in 0.34.
+#
+# The requirements re-install is not redundant. comfy-cli installs node
+# dependencies into its own workspace venv (/comfyui/.venv), but start.sh
+# launches ComfyUI with /opt/venv's python — the same mismatch the base stage
+# documents. Without this, nodes fail to import at runtime, not at build time.
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      comfy-node-install comfyui-kjnodes comfyui-videohelpersuite comfyui-frame-interpolation && \
+      for r in /comfyui/custom_nodes/*/requirements.txt; do \
+        [ -f "$r" ] && uv pip install -r "$r" || true; \
+      done; \
+    fi
+
+# RIFE ships without weights; the node looks for them under its own ckpts/ dir.
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      mkdir -p /comfyui/custom_nodes/comfyui-frame-interpolation/ckpts/rife && \
+      wget -q -O /comfyui/custom_nodes/comfyui-frame-interpolation/ckpts/rife/rife49.pth \
+        https://huggingface.co/hfmaster/models-moved/resolve/cab6dcee2fbb05e190dbb8f536fbdaa489031a14/rife/rife49.pth; \
+    fi
+
+# Re-run the base stage's smoke test now that custom nodes are in the import
+# graph — a node whose dependencies conflict only shows up when it is imported,
+# and base ran this before these packs existed.
+RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
+      cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu; \
+    fi

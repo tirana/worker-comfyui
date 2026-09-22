@@ -59,6 +59,12 @@ COMFY_HOST = "127.0.0.1:8188"
 # see https://docs.runpod.io/docs/handler-additional-controls#refresh-worker
 REFRESH_WORKER = os.environ.get("REFRESH_WORKER", "false").lower() == "true"
 
+# Output keys under which ComfyUI nodes report saved files. All of them carry the
+# same {filename, subfolder, type} entries, so /view fetches them identically —
+# only the key differs by media kind. VHS_VideoCombine reports under "gifs"
+# regardless of the container it actually wrote (mp4, webm, ...).
+MEDIA_KEYS = ("images", "gifs", "videos", "audio")
+
 # ---------------------------------------------------------------------------
 # Model loader nodes — used for pre-flight validation of workflow model refs
 # ---------------------------------------------------------------------------
@@ -996,11 +1002,14 @@ def handler(job):
 
         print(f"worker-comfyui - Processing {len(outputs)} output nodes...")
         for node_id, node_output in outputs.items():
-            if "images" in node_output:
-                print(
-                    f"worker-comfyui - Node {node_id} contains {len(node_output['images'])} image(s)"
-                )
-                for image_info in node_output["images"]:
+            # Video and audio nodes report the same {filename, subfolder, type}
+            # shape as images, just under a different key: VHS_VideoCombine uses
+            # "gifs" whatever the container actually is, ComfyUI's native video
+            # nodes use "videos". Fetching is identical, so flatten into one list.
+            media = [item for key in MEDIA_KEYS for item in node_output.get(key, [])]
+            if media:
+                print(f"worker-comfyui - Node {node_id} contains {len(media)} file(s)")
+                for image_info in media:
                     filename = image_info.get("filename")
                     subfolder = image_info.get("subfolder", "")
                     img_type = image_info.get("type")
@@ -1085,7 +1094,7 @@ def handler(job):
                         errors.append(error_msg)
 
             # Check for other output types
-            other_keys = [k for k in node_output.keys() if k != "images"]
+            other_keys = [k for k in node_output.keys() if k not in MEDIA_KEYS]
             if other_keys:
                 warn_msg = (
                     f"Node {node_id} produced unhandled output keys: {other_keys}."

@@ -35,6 +35,12 @@ variable "HUGGINGFACE_ACCESS_TOKEN" {
   default = ""
 }
 
+# Set automatically by GitHub Actions ("owner/repo"); used to link the published
+# GHCR package back to this repository.
+variable "GITHUB_REPOSITORY" {
+  default = "runpod-workers/worker-comfyui"
+}
+
 group "default" {
   targets = ["base", "sdxl", "sd3", "flux1-schnell", "flux1-dev", "flux1-dev-fp8", "z-image-turbo", "base-cuda12-8-1"]
 }
@@ -152,6 +158,32 @@ target "z-image-turbo" {
     HUGGINGFACE_ACCESS_TOKEN = "${HUGGINGFACE_ACCESS_TOKEN}"
   }
   tags = ["${DOCKERHUB_REPO}/${DOCKERHUB_IMG}:${RELEASE_VERSION}-z-image-turbo"]
+  inherits = ["base"]
+}
+
+# Wan 2.2 image-to-video. Deliberately NOT in the "default" group: it bakes
+# ~35 GiB of weights, so a plain `docker buildx bake` shouldn't pull it in.
+# Build it explicitly: `docker buildx bake wan2.2-i2v`.
+target "wan2.2-i2v" {
+  context = "."
+  dockerfile = "Dockerfile"
+  target = "final"
+  args = {
+    BASE_IMAGE = "${BASE_IMAGE}"
+    COMFYUI_VERSION = "${COMFYUI_VERSION}"
+    CUDA_VERSION_FOR_COMFY = "${CUDA_VERSION_FOR_COMFY}"
+    ENABLE_PYTORCH_UPGRADE = "${ENABLE_PYTORCH_UPGRADE}"
+    PYTORCH_INDEX_URL = "${PYTORCH_INDEX_URL}"
+    MODEL_TYPE = "wan2.2-i2v"
+  }
+  tags = ["${DOCKERHUB_REPO}/${DOCKERHUB_IMG}:${RELEASE_VERSION}-wan2.2-i2v"]
+  # Links the published package to this repository, so it appears under the
+  # repo's Packages tab and inherits its access permissions. Note that it does
+  # NOT inherit visibility: a new GHCR package is private until you change it
+  # by hand in the package's settings, and RunPod cannot pull it until you do.
+  labels = {
+    "org.opencontainers.image.source" = "https://github.com/${GITHUB_REPOSITORY}"
+  }
   inherits = ["base"]
 }
 

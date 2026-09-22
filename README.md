@@ -43,6 +43,10 @@ These images are available on Docker Hub under `runpod/worker-comfyui`:
 
 Replace `<version>` with the current release tag, check the [releases page](https://github.com/runpod-workers/worker-comfyui/releases) for the latest version.
 
+This fork also builds a video variant, which is not published on Docker Hub:
+
+- **`ghcr.io/<owner>/worker-comfyui:<version>-wan2.2-i2v`**: Image-to-video with [Wan 2.2 I2V A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B), including the custom nodes the workflow needs. See the [Wan 2.2 I2V guide](docs/wan2.2-i2v.md).
+
 ## API Specification
 
 The worker exposes standard RunPod serverless endpoints (`/run`, `/runsync`, `/health`). By default, images are returned as base64 strings. You can configure the worker to upload images to an S3 bucket instead by setting specific environment variables (see [Configuration Guide](docs/configuration.md)).

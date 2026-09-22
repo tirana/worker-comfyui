@@ -424,5 +424,81 @@ class TestHandlerPreflightOrdering(unittest.TestCase):
         self.assertEqual(mock_queue.call_args[0][0], workflow)
 
 
+class TestVideoOutputs(unittest.TestCase):
+    """Video nodes report files under keys other than "images" (see MEDIA_KEYS)."""
+
+    def _run_with_outputs(self, outputs):
+        with patch("handler.get_image_data", return_value=b"\x00\x00\x00\x18ftyp"), patch(
+            "handler.get_history", return_value={"abc": {"outputs": outputs}}
+        ), patch("handler.queue_workflow", return_value={"prompt_id": "abc"}), patch(
+            "handler.websocket.WebSocket"
+        ) as mock_ws_cls, patch(
+            "handler.check_server", return_value=True
+        ), patch(
+            "handler.requests.get"
+        ) as mock_get:
+            mock_get.return_value = _mock_object_info_response(_make_object_info())
+            mock_ws = MagicMock()
+            mock_ws.recv.return_value = json.dumps(
+                {"type": "executing", "data": {"node": None, "prompt_id": "abc"}}
+            )
+            mock_ws_cls.return_value = mock_ws
+            workflow = {
+                "1": {
+                    "class_type": "CheckpointLoaderSimple",
+                    "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"},
+                }
+            }
+            return handler.handler({"id": "job-video", "input": {"workflow": workflow}})
+
+    def test_vhs_video_combine_mp4_is_returned(self):
+        """VHS_VideoCombine reports an mp4 under "gifs" — it must not be dropped."""
+        result = self._run_with_outputs(
+            {
+                "277": {
+                    "gifs": [
+                        {
+                            "filename": "clip_00001.mp4",
+                            "subfolder": "",
+                            "type": "output",
+                        }
+                    ]
+                }
+            }
+        )
+        self.assertNotIn("error", result)
+        self.assertEqual(len(result["images"]), 1)
+        self.assertEqual(result["images"][0]["filename"], "clip_00001.mp4")
+        self.assertEqual(result["images"][0]["type"], "base64")
+
+    def test_images_and_videos_from_one_node_are_merged(self):
+        result = self._run_with_outputs(
+            {
+                "9": {
+                    "images": [
+                        {"filename": "frame.png", "subfolder": "", "type": "output"}
+                    ],
+                    "videos": [
+                        {"filename": "clip.webm", "subfolder": "", "type": "output"}
+                    ],
+                }
+            }
+        )
+        self.assertNotIn("error", result)
+        self.assertEqual(
+            {item["filename"] for item in result["images"]},
+            {"frame.png", "clip.webm"},
+        )
+
+    def test_media_keys_are_not_reported_as_unhandled(self):
+        """The unhandled-key warning must not fire for keys we now collect."""
+        for key in handler.MEDIA_KEYS:
+            with self.subTest(key=key):
+                node_output = {key: []}
+                self.assertEqual(
+                    [k for k in node_output if k not in handler.MEDIA_KEYS], []
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
