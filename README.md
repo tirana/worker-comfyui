@@ -4,6 +4,8 @@ A RunPod serverless worker that runs Wan 2.2 image-to-video ComfyUI workflows. F
 [runpod-workers/worker-comfyui](https://github.com/runpod-workers/worker-comfyui), stripped to
 this one job.
 
+
+
 Two differences from upstream:
 
 - **Video output is returned.** Upstream only collected a node's `images`; `VHS_VideoCombine`
