@@ -1,0 +1,75 @@
+name: Build and Push Image
+
+# Manual only. The image is ~45 GB and the build takes 40-70 minutes, most of
+# it uploading — you don't want this on every push.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag, e.g. 1.0 -> ghcr.io/<owner>/worker-comfyui:1.0"
+        required: true
+        default: "1.0"
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # ~45 GB of layers plus their (incompressible) push blobs is ~90 GB at
+      # peak, against a runner with ~45 GB free on / and ~65 GB on /mnt.
+      # Deleting preinstalled toolchains alone does not get there: this action
+      # LVMs the free space on BOTH disks into one volume and mounts it where
+      # Docker keeps everything. Docker needs a restart afterwards, because its
+      # data directory was just replaced underneath it.
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 6144
+          swap-size-mb: 1024
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          build-mount-path: "/var/lib/docker"
+          build-mount-path-ownership: "root:root"
+
+      - name: Restart Docker
+        run: sudo systemctl restart docker
+
+      - name: Disk space before build
+        run: df -h / /var/lib/docker
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No cache-to: type=gha — that cache is capped at 10 GB per repository,
+      # so a 45 GB image would only thrash it.
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.tag }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Disk space after build
+        if: always()
+        run: df -h / /var/lib/docker || true

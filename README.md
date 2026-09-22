@@ -1,197 +1,123 @@
-# worker-comfyui
+# worker-comfyui — Wan 2.2 image-to-video
 
-> [ComfyUI](https://github.com/comfyanonymous/ComfyUI) as a serverless API on [RunPod](https://www.runpod.io/)
+A RunPod serverless worker that runs Wan 2.2 image-to-video ComfyUI workflows. Fork of
+[runpod-workers/worker-comfyui](https://github.com/runpod-workers/worker-comfyui), stripped to
+this one job.
 
-<p align="center">
-  <img src="assets/worker_sitting_in_comfy_chair.jpg" title="Worker sitting in comfy chair" />
-</p>
+Two differences from upstream:
 
-[![RunPod](https://api.runpod.io/badge/runpod-workers/worker-comfyui)](https://www.runpod.io/console/hub/runpod-workers/worker-comfyui)
+- **Video output is returned.** Upstream only collected a node's `images`; `VHS_VideoCombine`
+  reports its MP4 under `gifs`, so the clip was silently discarded. The handler now collects
+  every key in `MEDIA_KEYS` — `images`, `gifs`, `videos`, `audio` — into one list.
+- **Wan 2.2 weights and video nodes are baked in.** One image, no `MODEL_TYPE` variants.
 
----
+## Build
 
-This project allows you to run ComfyUI workflows as a serverless API endpoint on the RunPod platform. Submit workflows via API calls and receive generated images as base64 strings or S3 URLs.
+The [`Build and Push Image`](.github/workflows/build-image.yml) workflow builds and pushes to
+GHCR. Manual trigger only — ~45 GB and 40-70 minutes.
 
-## Table of Contents
+The resulting package is **private until you change it by hand** in the package settings, and
+RunPod cannot pull it before then. Public also keeps it free of your storage quota.
 
-- [Quickstart](#quickstart)
-- [Available Docker Images](#available-docker-images)
-- [API Specification](#api-specification)
-- [Usage](#usage)
-- [Getting the Workflow JSON](#getting-the-workflow-json)
-- [Further Documentation](#further-documentation)
+## Endpoint settings
 
----
+| Setting | Value | Why |
+| --- | --- | --- |
+| Container image | `ghcr.io/<owner>/worker-comfyui:<tag>` | |
+| Container disk | **≥ 60 GB** | The default 20 GB cannot hold a 45 GB image. |
+| GPU | 24 GB is enough | 4090 / A40 / A6000 / L40S. |
+| Network volume | optional | Only for swappable LoRAs, see below. |
 
-## Quickstart
+## API
 
-1.  🐳 Choose one of the [available Docker images](#available-docker-images) for your serverless endpoint (e.g., `runpod/worker-comfyui:<version>-sd3`).
-2.  📄 Follow the [Deployment Guide](docs/deployment.md) to set up your RunPod template and endpoint.
-3.  ⚙️ Optionally configure the worker (e.g., for S3 upload) using environment variables - see the full [Configuration Guide](docs/configuration.md).
-4.  🧪 Pick an example workflow from [`test_resources/workflows/`](./test_resources/workflows/) or [get your own](#getting-the-workflow-json).
-5.  🚀 Follow the [Usage](#usage) steps below to interact with your deployed endpoint.
-
-## Available Docker Images
-
-These images are available on Docker Hub under `runpod/worker-comfyui`:
-
-- **`runpod/worker-comfyui:<version>-base`**: Clean ComfyUI install with no models.
-- **`runpod/worker-comfyui:<version>-flux1-schnell`**: Includes checkpoint, text encoders, and VAE for [FLUX.1 schnell](https://huggingface.co/black-forest-labs/FLUX.1-schnell).
-- **`runpod/worker-comfyui:<version>-flux1-dev`**: Includes checkpoint, text encoders, and VAE for [FLUX.1 dev](https://huggingface.co/black-forest-labs/FLUX.1-dev).
-- **`runpod/worker-comfyui:<version>-sdxl`**: Includes checkpoint and VAEs for [Stable Diffusion XL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0).
-- **`runpod/worker-comfyui:<version>-sd3`**: Includes checkpoint for [Stable Diffusion 3 medium](https://huggingface.co/stabilityai/stable-diffusion-3-medium).
-
-Replace `<version>` with the current release tag, check the [releases page](https://github.com/runpod-workers/worker-comfyui/releases) for the latest version.
-
-This fork also builds a video variant, which is not published on Docker Hub:
-
-- **`ghcr.io/<owner>/worker-comfyui:<version>-wan2.2-i2v`**: Image-to-video with [Wan 2.2 I2V A14B](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B), including the custom nodes the workflow needs. See the [Wan 2.2 I2V guide](docs/wan2.2-i2v.md).
-
-## API Specification
-
-The worker exposes standard RunPod serverless endpoints (`/run`, `/runsync`, `/health`). By default, images are returned as base64 strings. You can configure the worker to upload images to an S3 bucket instead by setting specific environment variables (see [Configuration Guide](docs/configuration.md)).
-
-Use the `/runsync` endpoint for synchronous requests that wait for the job to complete and return the result directly. Use the `/run` endpoint for asynchronous requests that return immediately with a job ID; you'll need to poll the `/status` endpoint separately to get the result.
-
-### Input
+Send the whole ComfyUI workflow in API format:
 
 ```json
 {
   "input": {
-    "workflow": {
-      "6": {
-        "inputs": {
-          "text": "a ball on the table",
-          "clip": ["30", 1]
-        },
-        "class_type": "CLIPTextEncode",
-        "_meta": {
-          "title": "CLIP Text Encode (Positive Prompt)"
-        }
-      }
-    },
-    "images": [
-      {
-        "name": "input_image_1.png",
-        "image": "data:image/png;base64,iVBOR..."
-      }
-    ]
+    "workflow": { "...": "the graph" },
+    "images": [{ "name": "input.png", "image": "<base64>" }]
   }
 }
 ```
 
-The following tables describe the fields within the `input` object:
+The clip comes back in `output.images` as base64 with its real `.mp4` filename, or as an S3
+URL if `BUCKET_ENDPOINT_URL` is set.
 
-| Field Path                | Type   | Required | Description                                                                                                                                |
-| ------------------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `input`                   | Object | Yes      | Top-level object containing request data.                                                                                                  |
-| `input.workflow`          | Object | Yes      | The ComfyUI workflow exported in the [required format](#getting-the-workflow-json).                                                        |
-| `input.images`            | Array  | No       | Optional array of input images. Each image is uploaded to ComfyUI's `input` directory and can be referenced by its `name` in the workflow. |
-| `input.comfy_org_api_key` | String | No       | Optional per-request Comfy.org API key for API Nodes. Overrides the `COMFY_ORG_API_KEY` environment variable if both are set.              |
+Useful environment variables: `BUCKET_ENDPOINT_URL` / `BUCKET_ACCESS_KEY_ID` /
+`BUCKET_SECRET_ACCESS_KEY` for S3 output, `REFRESH_WORKER=true` to restart after each job,
+`COMFY_LOG_LEVEL`, and `NETWORK_VOLUME_DEBUG=true` to print what ComfyUI discovered on the
+volume.
 
-#### `input.images` Object
+## What is in the image
 
-Each object within the `input.images` array must contain:
+Weights, ~35 GiB, from the Comfy-Org repackages (Apache 2.0, no HF token needed):
 
-| Field Name | Type   | Required | Description                                                                                                                       |
-| ---------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `name`     | String | Yes      | Filename used to reference the image in the workflow (e.g., via a "Load Image" node). Must be unique within the array.            |
-| `image`    | String | Yes      | Base64 encoded string of the image. A data URI prefix (e.g., `data:image/png;base64,`) is optional and will be handled correctly. |
+| File | Directory | Size |
+| --- | --- | --- |
+| `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` | `diffusion_models/` | 13.31 GiB |
+| `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` | `diffusion_models/` | 13.31 GiB |
+| `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `text_encoders/` | 6.27 GiB |
+| `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` | `loras/` | 1.14 GiB |
+| `wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors` | `loras/` | 1.14 GiB |
+| `wan_2.1_vae.safetensors` | `vae/` | 0.24 GiB |
 
-> [!NOTE]
->
-> **Size Limits:** RunPod endpoints have request size limits (e.g., 10MB for `/run`, 20MB for `/runsync`). Large base64 input images can exceed these limits. See [RunPod Docs](https://docs.runpod.io/docs/serverless-endpoint-urls).
+Wan 2.2 is a mixture of experts: the high-noise expert handles early steps and global
+composition, the low-noise one the later steps. Both are needed, and a LoRA generally has to be
+applied to each separately. The lightx2v distill LoRAs are what make 4-step sampling viable.
 
-### Output
+Custom nodes — a network volume cannot supply these, so they have to be in the image:
 
-> [!WARNING]
->
-> **Breaking Change in Output Format (5.0.0+)**
->
-> Versions `< 5.0.0` returned the primary image data (S3 URL or base64 string) directly within an `output.message` field.
-> Starting with `5.0.0`, the output format has changed significantly, see below
+| Pack | Provides |
+| --- | --- |
+| [KJNodes](https://github.com/kijai/ComfyUI-KJNodes) | `ScheduledCFGGuidance`, `ModelPassThrough`, `VRAM_Debug`, `DummyOut`, `INTConstant`, `FloatConstant` |
+| [VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite) | `VHS_VideoCombine` — the MP4 writer |
+| [Frame-Interpolation](https://github.com/Fannovel16/ComfyUI-Frame-Interpolation) | `RIFE VFI` plus `rife49.pth`, doubling 16 fps to 32 fps |
 
-```json
-{
-  "id": "sync-uuid-string",
-  "status": "COMPLETED",
-  "output": {
-    "images": [
-      {
-        "filename": "ComfyUI_00001_.png",
-        "type": "base64",
-        "data": "iVBORw0KGgoAAAANSUhEUg..."
-      }
-    ]
-  },
-  "delayTime": 123,
-  "executionTime": 4567
-}
-```
+`EasyCache` is **not** in that list — it became a core ComfyUI node in 0.34. Worth keeping in a
+workflow: pure PyTorch, no special hardware, skips redundant steps.
 
-| Field Path      | Type             | Required | Description                                                                                                 |
-| --------------- | ---------------- | -------- | ----------------------------------------------------------------------------------------------------------- |
-| `output`        | Object           | Yes      | Top-level object containing the results of the job execution.                                               |
-| `output.images` | Array of Objects | No       | Present if the workflow generated images. Contains a list of objects, each representing one output image.   |
-| `output.errors` | Array of Strings | No       | Present if non-fatal errors or warnings occurred during processing (e.g., S3 upload failure, missing data). |
+**Deliberately left out.** `SageAttention` compiles CUDA kernels at build time and its
+`sageattn_qk_int8_pv_fp8_cuda++` path needs sm_89+, which is what produces
+`fp8e4nv not supported in this architecture` on Ampere — leaving it out keeps A40 / A6000 /
+3090 usable. `TorchCompile` costs 1-3 minutes of inductor compilation on every cold container
+and recompiles per resolution. Both are speed optimizations on a pipeline that is correct
+without them; add them back deliberately, and measure.
 
-#### `output.images`
+## Adding LoRAs without rebuilding
 
-Each object in the `output.images` array has the following structure:
+[`src/extra_model_paths.yaml`](src/extra_model_paths.yaml) maps `loras` to
+`/runpod-volume/models/loras/`, and ComfyUI unions that with the baked `models/loras` — both
+are visible at once. Attach a network volume, drop `.safetensors` files into `models/loras/` on
+it from a cheap Pod, and reference them by filename in the workflow. No rebuild.
 
-| Field Name | Type   | Description                                                                                     |
-| ---------- | ------ | ----------------------------------------------------------------------------------------------- |
-| `filename` | String | The original filename assigned by ComfyUI during generation.                                    |
-| `type`     | String | Indicates the format of the data. Either `"base64"` or `"s3_url"` (if S3 upload is configured). |
-| `data`     | String | Contains either the base64 encoded image string or the S3 URL for the uploaded image file.      |
+Two things to get right when stacking a LoRA on the 4-step distill:
 
-> [!NOTE]
-> The `output.images` field provides a list of all generated images (excluding temporary ones).
->
-> - If S3 upload is **not** configured (default), `type` will be `"base64"` and `data` will contain the base64 encoded image string.
-> - If S3 upload **is** configured, `type` will be `"s3_url"` and `data` will contain the S3 URL. See the [Configuration Guide](docs/configuration.md#example-s3-response) for an S3 example response.
-> - Clients interacting with the API need to handle this list-based structure under `output.images`.
+- **Apply it to both experts, at different strengths.** A typical graph runs the lightx2v LoRA
+  at ~0.4 on the high-noise expert and 1.0 on the low-noise one. Chain a second
+  `LoraLoaderModelOnly` per expert and start conservative — high ≈ 0.3-0.5, low ≈ 0.6-0.8.
+  High-noise LoRAs drive global composition and in image-to-video readily override the start
+  frame, and a second LoRA at full strength on top of a distill LoRA tends to cost motion.
+- **Check the licence.** The baked weights are Apache 2.0 and the node packs GPL-family or MIT,
+  all fine commercially. Community LoRAs frequently ship with no licence at all, or a Civitai
+  licence restricting commercial use.
 
-## Usage
+## Verifying a workflow
 
-To interact with your deployed RunPod endpoint:
-
-1.  **Get API Key:** Generate a key in RunPod [User Settings](https://www.runpod.io/console/serverless/user/settings) (`API Keys` section).
-2.  **Get Endpoint ID:** Find your endpoint ID on the [Serverless Endpoints](https://www.runpod.io/console/serverless/user/endpoints) page or on the `Overview` page of your endpoint.
-
-### Generate Image (Sync Example)
-
-Send a workflow to the `/runsync` endpoint (waits for completion). Replace `<api_key>` and `<endpoint_id>`. The `-d` value should contain the [JSON input described above](#input).
+A missing custom node shows up as a failed job on a paid GPU. Boot the image and diff your
+workflow's classes against what ComfyUI registered:
 
 ```bash
-curl -X POST \
-  -H "Authorization: Bearer <api_key>" \
-  -H "Content-Type: application/json" \
-  -d '{"input":{"workflow":{... your workflow JSON ...}}}' \
-  https://api.runpod.ai/v2/<endpoint_id>/runsync
+curl -s localhost:8188/object_info | python3 -c '
+import json, sys
+have = set(json.load(sys.stdin))
+want = {n["class_type"] for n in json.load(open("your_workflow.json")).values()}
+print("MISSING:", want - have or "none")'
 ```
 
-You can also use the `/run` endpoint for asynchronous jobs and then poll the `/status` to see when the job is done. Or you [add a `webhook` into your request](https://docs.runpod.io/serverless/endpoints/send-requests#webhook-notifications) to be notified when the job is done.
+It must print `none`.
 
-Refer to [`test_input.json`](./test_input.json) for a complete input example.
+## Licence
 
-## Getting the Workflow JSON
-
-To get the correct `workflow` JSON for the API:
-
-1.  Open ComfyUI in your browser.
-2.  In the top navigation, select `Workflow > Export (API)`
-3.  A `workflow.json` file will be downloaded. Use the content of this file as the value for the `input.workflow` field in your API requests.
-
-## SSH Access
-
-To enable SSH access to the worker, set the `PUBLIC_KEY` environment variable to your SSH public key. The worker will start an SSH server automatically. Make sure to expose **port 22** in your RunPod template so you can connect.
-
-## Further Documentation
-
-- **[Deployment Guide](docs/deployment.md):** Detailed steps for deploying on RunPod.
-- **[Configuration Guide](docs/configuration.md):** Full list of environment variables (including S3 setup).
-- **[Customization Guide](docs/customization.md):** Adding custom models and nodes (Network Volumes, Docker builds).
-- **[Development Guide](docs/development.md):** Setting up a local environment for development & testing
-- **[CI/CD Guide](docs/ci-cd.md):** Information about the automated Docker build and publish workflows.
-- **[Acknowledgments](docs/acknowledgments.md):** Credits and thanks
+AGPL-3.0, inherited from upstream. Serving this over a network is what §13 covers, so the
+modified source has to be available — keeping this repository public satisfies that.

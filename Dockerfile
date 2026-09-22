@@ -1,248 +1,104 @@
-# Build argument for base image selection
-ARG BASE_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+# Wan 2.2 image-to-video worker for RunPod serverless.
+#
+# One image, one job. Weights are baked in (~35 GiB) so a warm host loads them
+# from local NVMe; the network volume is still read for extra LoRAs, see README.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
-# Stage 1: Base image with common dependencies
-FROM ${BASE_IMAGE} AS base
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_PREFER_BINARY=1 \
+    PYTHONUNBUFFERED=1
 
-# Build arguments for this stage with sensible defaults for standalone builds
-ARG COMFYUI_VERSION=0.34.0
-ARG CUDA_VERSION_FOR_COMFY=12.8
-ARG ENABLE_PYTORCH_UPGRADE=false
-ARG PYTORCH_INDEX_URL
-
-# Prevents prompts from packages asking for user input during installation
-ENV DEBIAN_FRONTEND=noninteractive
-# Prefer binary wheels over source distributions for faster pip installations
-ENV PIP_PREFER_BINARY=1
-# Ensures output from python is printed immediately to the terminal without buffering
-ENV PYTHONUNBUFFERED=1
-# Speed up some cmake builds
-ENV CMAKE_BUILD_PARALLEL_LEVEL=8
-
-# Install Python, git and other necessary tools
-RUN apt-get update && apt-get install -y \
-    python3.12 \
-    python3.12-venv \
-    git \
-    wget \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    ffmpeg \
-    openssh-server \
+# ffmpeg is not optional: VHS_VideoCombine shells out to it to write the MP4.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3.12 \
+      python3.12-venv \
+      git \
+      wget \
+      ffmpeg \
+      libgl1 \
+      libglib2.0-0 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
-    && ln -sf /usr/bin/pip3 /usr/bin/pip
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Clean up to reduce image size
-RUN apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
-
-# Install uv (latest) using official installer and create isolated venv
+# One venv, used by every later step and by start.sh. ComfyUI and the handler
+# share it, so there is no workspace/launch split to get wrong.
 RUN wget -qO- https://astral.sh/uv/install.sh | sh \
     && ln -s /root/.local/bin/uv /usr/local/bin/uv \
-    && ln -s /root/.local/bin/uvx /usr/local/bin/uvx \
     && uv venv /opt/venv
-
-# Use the virtual environment for all subsequent commands
 ENV PATH="/opt/venv/bin:${PATH}"
 
-# Install comfy-cli + dependencies needed by it to install ComfyUI
-# comfy-cli is pinned: its install/torch-index behavior decides what lands in
-# the workspace venv, so an unpinned version makes builds non-reproducible.
-RUN uv pip install comfy-cli==1.13.0 pip setuptools wheel
+RUN git clone --depth 1 --branch v0.34.0 https://github.com/comfyanonymous/ComfyUI.git /comfyui
 
-# Install ComfyUI
-RUN if [ -n "${CUDA_VERSION_FOR_COMFY}" ]; then \
-      /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --cuda-version "${CUDA_VERSION_FOR_COMFY}" --nvidia; \
-    else \
-      /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --nvidia; \
-    fi
+ADD requirements.txt /requirements.txt
 
-# Upgrade PyTorch if needed (for newer CUDA versions)
-RUN if [ "$ENABLE_PYTORCH_UPGRADE" = "true" ]; then \
-      uv pip install --force-reinstall torch torchvision torchaudio --index-url ${PYTORCH_INDEX_URL}; \
-    fi
-
-# comfy-cli installs ComfyUI into its own workspace venv (/comfyui/.venv), but
-# start.sh launches ComfyUI with /opt/venv's python. That mismatch leaves the
-# launch venv missing ComfyUI's runtime deps (e.g. sqlalchemy, pulled in by
-# ComfyUI's asset DB), so ComfyUI crashes at startup and surfaces as the
-# misleading "ComfyUI server (127.0.0.1:8188) not reachable" error. Mirror
-# ComfyUI's full dependency set (core + custom nodes) into /opt/venv so the
-# launch venv is complete. Root-cause fix for DR-1170.
+# torch is installed FIRST and pinned to +cu128: ComfyUI's requirements.txt asks
+# for a bare `torch`, and PyPI now serves CUDA 13 builds that need driver >= 580.
+# RunPod hosts advertise CUDA 12.8/12.9 (driver 570/575), where a cu13 torch
+# fails CUDA init at startup. Installing it first satisfies the bare requirement.
 #
-# The transformers/huggingface-hub pin is part of the SAME step on purpose:
-# ComfyUI declares transformers>=4.50.3 and huggingface-hub with NO upper bound,
-# so a fresh install can pull transformers 5.x / huggingface-hub 1.x whose
-# breaking API changes also crash ComfyUI at startup. Pinning them in the same
-# RUN downgrades within one layer, so the unwanted versions aren't left behind
-# bloating the image.
-#
-# torch is installed FIRST, pinned to +cu128 builds: ComfyUI's requirements.txt
-# declares a bare `torch`, and default PyPI serves CUDA 13 builds (torch's PyPI
-# wheels depend on nvidia-*-cu13 since 2.11) that require driver >= 580. Hosts
-# allowed in .runpod/hub.json advertise CUDA 12.8/12.9 (driver 570/575), where
-# a cu13 torch fails CUDA init at startup. cu128 builds run on driver >= 570,
-# i.e. every allowed host. Installing torch first satisfies the bare `torch`
-# requirement so the PyPI pass doesn't touch it.
+# transformers/huggingface-hub are pinned in the same step because ComfyUI
+# declares them with no upper bound, and 5.x / 1.x break it at import time.
 RUN uv pip install torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
       --index-url https://download.pytorch.org/whl/cu128 \
     && uv pip install -r /comfyui/requirements.txt \
-    && for r in /comfyui/custom_nodes/*/requirements.txt; do \
-         [ -f "$r" ] && uv pip install -r "$r" || true; \
-       done \
-    && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0"
+    && uv pip install "transformers>=4.50.3,<5" "huggingface-hub<1.0" \
+    && uv pip install -r /requirements.txt
 
-# Build-time smoke test: actually start ComfyUI (imports the full node graph) so
-# a startup-breaking dependency is caught HERE, at build time, instead of as a
-# runtime "server not reachable" failure on a live worker. Runs on CPU — no GPU
-# needed to exercise the import graph.
-RUN cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu
-
-# Change working directory to ComfyUI
-WORKDIR /comfyui
-
-# Support for the network volume
-ADD src/extra_model_paths.yaml ./
-
-# Go back to the root
-WORKDIR /
-
-# Install Python runtime dependencies for the handler
-RUN uv pip install runpod requests websocket-client
-
-# Add application code and scripts
-ADD src/start.sh src/network_volume.py handler.py test_input.json ./
-RUN chmod +x /start.sh
-
-# Add script to install custom nodes
-COPY scripts/comfy-node-install.sh /usr/local/bin/comfy-node-install
-RUN chmod +x /usr/local/bin/comfy-node-install
-
-# Prevent pip from asking for confirmation during uninstall steps in custom nodes
-ENV PIP_NO_INPUT=1
-
-# Copy helper script to switch Manager network mode at container start
-COPY scripts/comfy-manager-set-mode.sh /usr/local/bin/comfy-manager-set-mode
-RUN chmod +x /usr/local/bin/comfy-manager-set-mode
-
-# Set the default command to run when starting the container
-CMD ["/start.sh"]
-
-# Stage 2: Download models
-FROM base AS downloader
-
-ARG HUGGINGFACE_ACCESS_TOKEN
-# Set default model type if none is provided
-ARG MODEL_TYPE=flux1-dev-fp8
-
-# Change working directory to ComfyUI
-WORKDIR /comfyui
-
-# Create necessary directories upfront
-RUN mkdir -p models/checkpoints models/vae models/unet models/clip models/text_encoders models/diffusion_models models/model_patches models/loras
-
-# Download checkpoints/vae/unet/clip models to include in image based on model type
-RUN if [ "$MODEL_TYPE" = "sdxl" ]; then \
-      wget -q -O models/checkpoints/sd_xl_base_1.0.safetensors https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors && \
-      wget -q -O models/vae/sdxl_vae.safetensors https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors && \
-      wget -q -O models/vae/sdxl-vae-fp16-fix.safetensors https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "sd3" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/checkpoints/sd3_medium_incl_clips_t5xxlfp8.safetensors https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "flux1-schnell" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/unet/flux1-schnell.safetensors https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors && \
-      wget -q -O models/clip/clip_l.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors && \
-      wget -q -O models/clip/t5xxl_fp8_e4m3fn.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/vae/ae.safetensors https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "flux1-dev" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/unet/flux1-dev.safetensors https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors && \
-      wget -q -O models/clip/clip_l.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors && \
-      wget -q -O models/clip/t5xxl_fp8_e4m3fn.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/vae/ae.safetensors https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "flux1-dev-fp8" ]; then \
-      wget -q -O models/checkpoints/flux1-dev-fp8.safetensors https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "z-image-turbo" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/text_encoders/qwen_3_4b.safetensors https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/diffusion_models/z_image_turbo_bf16.safetensors https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/vae/ae.safetensors https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/model_patches/Z-Image-Turbo-Fun-Controlnet-Union.safetensors https://huggingface.co/alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union/resolve/main/Z-Image-Turbo-Fun-Controlnet-Union.safetensors; \
-    fi
-
-# Wan 2.2 image-to-video (~35 GiB). One wget per RUN on purpose: each weight
-# becomes its own layer, so a failed download doesn't invalidate the others and
-# BuildKit caches them independently — which matters when the total is this big.
-# The two 14B experts are a mixture-of-experts pair; the workflow needs both.
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      wget -q -O models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      wget -q -O models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors; \
-    fi
-
-# lightx2v distill LoRAs: they are what make 4-step sampling viable, one per expert.
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors && \
-      wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors; \
-    fi
-
-# Wan 2.2 reuses the 2.1 VAE, and its text encoder ships in the 2.1 repackage.
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      wget -q -O models/vae/wan_2.1_vae.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      wget -q -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors; \
-    fi
-
-# Stage 3: Final image
-FROM base AS final
-
-ARG MODEL_TYPE=flux1-dev-fp8
-
-# Copy models from stage 2 to the final image
-COPY --from=downloader /comfyui/models /comfyui/models
-
-# Custom nodes for the Wan 2.2 workflow. These come AFTER the model COPY so that
-# changing the node list doesn't invalidate the 35 GiB layer above.
-#   kjnodes             — ScheduledCFGGuidance, ModelPassThrough, VRAM_Debug,
+# Custom nodes the Wan workflow imports. Cloned directly — a network volume
+# cannot supply nodes, and they have to be in the image.
+#   KJNodes             - ScheduledCFGGuidance, ModelPassThrough, VRAM_Debug,
 #                         DummyOut, INTConstant, FloatConstant
-#   videohelpersuite    — VHS_VideoCombine, the MP4 writer
-#   frame-interpolation — RIFE VFI, which doubles 16fps to 32fps
-# EasyCache is NOT here: it became a core ComfyUI node in 0.34.
-#
-# The requirements re-install is not redundant. comfy-cli installs node
-# dependencies into its own workspace venv (/comfyui/.venv), but start.sh
-# launches ComfyUI with /opt/venv's python — the same mismatch the base stage
-# documents. Without this, nodes fail to import at runtime, not at build time.
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      comfy-node-install comfyui-kjnodes comfyui-videohelpersuite comfyui-frame-interpolation && \
-      for r in /comfyui/custom_nodes/*/requirements.txt; do \
-        [ -f "$r" ] && uv pip install -r "$r" || true; \
-      done; \
-    fi
+#   VideoHelperSuite    - VHS_VideoCombine, the MP4 writer
+#   Frame-Interpolation - RIFE VFI, which doubles 16fps to 32fps
+# EasyCache is not here: it is a core ComfyUI node as of 0.34.
+RUN cd /comfyui/custom_nodes \
+    && git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes.git \
+    && git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
+    && git clone --depth 1 https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git \
+    && for r in /comfyui/custom_nodes/*/requirements.txt; do uv pip install -r "$r"; done
 
 # RIFE ships without weights; the node looks for them under its own ckpts/ dir.
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      mkdir -p /comfyui/custom_nodes/comfyui-frame-interpolation/ckpts/rife && \
-      wget -q -O /comfyui/custom_nodes/comfyui-frame-interpolation/ckpts/rife/rife49.pth \
-        https://huggingface.co/hfmaster/models-moved/resolve/cab6dcee2fbb05e190dbb8f536fbdaa489031a14/rife/rife49.pth; \
-    fi
+RUN mkdir -p /comfyui/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife \
+    && wget -q -O /comfyui/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife/rife49.pth \
+         https://huggingface.co/hfmaster/models-moved/resolve/cab6dcee2fbb05e190dbb8f536fbdaa489031a14/rife/rife49.pth
 
-# Re-run the base stage's smoke test now that custom nodes are in the import
-# graph — a node whose dependencies conflict only shows up when it is imported,
-# and base ran this before these packs existed.
-RUN if [ "$MODEL_TYPE" = "wan2.2-i2v" ]; then \
-      cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu; \
-    fi
+# Start ComfyUI once on CPU so a custom node with conflicting dependencies fails
+# the build here, instead of as a "server not reachable" error on a live worker.
+RUN cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu
+
+# Wan 2.2 weights, ~35 GiB, Apache 2.0. One wget per layer so a failed download
+# doesn't invalidate the others. The two 14B experts are a mixture-of-experts
+# pair and the workflow needs both.
+WORKDIR /comfyui
+RUN mkdir -p models/diffusion_models models/text_encoders models/loras models/vae
+
+ARG WAN22=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
+ARG WAN21=https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files
+
+RUN wget -q -O models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors \
+      ${WAN22}/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+
+RUN wget -q -O models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors \
+      ${WAN22}/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+
+RUN wget -q -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors \
+      ${WAN21}/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
+
+# lightx2v distill LoRAs: what makes 4-step sampling viable, one per expert.
+RUN wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors \
+      ${WAN22}/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors \
+    && wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors \
+      ${WAN22}/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+
+# Wan 2.2 reuses the 2.1 VAE.
+RUN wget -q -O models/vae/wan_2.1_vae.safetensors ${WAN22}/vae/wan_2.1_vae.safetensors
+
+# Lets ComfyUI also read models from a mounted network volume, for LoRAs you
+# want to swap without rebuilding 35 GiB.
+ADD src/extra_model_paths.yaml ./
+
+WORKDIR /
+ADD src/start.sh src/network_volume.py handler.py ./
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]
