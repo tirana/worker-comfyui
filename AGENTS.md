@@ -24,7 +24,4 @@ Node types map to model directories — this is ComfyUI domain knowledge not enc
 
 ## Custom node compatibility
 
-Some custom nodes have dependency conflicts that only surface at runtime:
-
-- **ComfyUI-BrushNet**: Requires `diffusers>=0.29.0`, `accelerate>=0.29.0,<0.32.0`, and `peft>=0.7.0`. Without these exact ranges, you get silent import errors.
-- **General pattern**: When a custom node fails with import errors, check its dependency chain and pin versions in the Dockerfile with `uv pip install`.
+Custom node dependency conflicts only surface when the node is imported, not when it is installed. The Dockerfile's `--quick-test-for-ci --cpu` run exists to catch that at build time; if you add a node and it fails there, check its dependency chain and pin versions in the same `uv pip install` step.
