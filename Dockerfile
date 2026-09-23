@@ -1,6 +1,7 @@
+# syntax=docker/dockerfile:1
 # Wan 2.2 image-to-video worker for RunPod serverless.
 #
-# One image, one job. Weights are baked in (~35 GiB) so a warm host loads them
+# One image, one job. Weights are baked in (~45 GiB) so a warm host loads them
 # from local NVMe; the network volume is still read for extra LoRAs, see README.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
@@ -14,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.12-venv \
       git \
       wget \
+      curl \
       ffmpeg \
       libgl1 \
       libglib2.0-0 \
@@ -66,20 +68,33 @@ RUN mkdir -p /comfyui/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife \
 # the build here, instead of as a "server not reachable" error on a live worker.
 RUN cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu
 
-# Wan 2.2 weights, ~35 GiB, Apache 2.0. One wget per layer so a failed download
-# doesn't invalidate the others. The two 14B experts are a mixture-of-experts
-# pair and the workflow needs both.
+# Weights, ~45 GiB. One download per layer so a failed fetch doesn't invalidate
+# the others. The two 14B experts are a mixture-of-experts pair — high noise for
+# the early steps and global composition, low noise for the rest — and the
+# workflow needs both.
 WORKDIR /comfyui
 RUN mkdir -p models/diffusion_models models/text_encoders models/loras models/vae
 
 ARG WAN22=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
 ARG WAN21=https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files
 
-RUN wget -q -O models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors \
-      ${WAN22}/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors
+# The two experts are the DaSiWa TrueVision v11 (SnatchKiss) fine-tune rather
+# than the stock Comfy-Org checkpoints, pulled from Civitai with a build secret.
+# TrueVision is NON-distilled, which is what this workflow wants: the 8-step
+# sampling comes from the lightx2v LoRAs applied on top, further down. The
+# distilled "Lightspeed" line would need those LoRAs removed.
+#
+# 18.12 GiB each — v11 is fp8-mixed and keeps more layers at bf16 than the
+# stock fp8_scaled files did, which is where the extra size goes.
+RUN --mount=type=secret,id=CIVITAI_TOKEN \
+    curl -L -f -H "Authorization: Bearer $(cat /run/secrets/CIVITAI_TOKEN)" \
+      "https://civitai.com/api/download/models/2959309?fileId=2841257" \
+      -o models/diffusion_models/dasiwa_truevision_snatchkiss_v11_high.safetensors
 
-RUN wget -q -O models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors \
-      ${WAN22}/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors
+RUN --mount=type=secret,id=CIVITAI_TOKEN \
+    curl -L -f -H "Authorization: Bearer $(cat /run/secrets/CIVITAI_TOKEN)" \
+      "https://civitai.com/api/download/models/2959520?fileId=2840642" \
+      -o models/diffusion_models/dasiwa_truevision_snatchkiss_v11_low.safetensors
 
 RUN wget -q -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors \
       ${WAN21}/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
@@ -94,7 +109,7 @@ RUN wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safete
 RUN wget -q -O models/vae/wan_2.1_vae.safetensors ${WAN22}/vae/wan_2.1_vae.safetensors
 
 # Lets ComfyUI also read models from a mounted network volume, for LoRAs you
-# want to swap without rebuilding 35 GiB.
+# want to swap without rebuilding 45 GiB.
 ADD src/extra_model_paths.yaml ./
 
 WORKDIR /

@@ -21,8 +21,12 @@ to `main` and pushes to
 `wan2.2-i2v` and `latest`. Doc-only commits are skipped via `paths-ignore`; you can also run it
 by hand with a tag override.
 
-A cold build takes about **20 minutes**, nearly all of it fetching the 35 GiB of weights and
-pushing the image. Later builds read the previous `:latest` as a layer cache, and because the
+The build needs a **`CIVITAI_TOKEN`** repository secret (Settings → Secrets and variables →
+Actions), since the checkpoints are fetched from Civitai with a bearer token. It is passed
+through BuildKit's secret mount, so it never lands in an image layer.
+
+A cold build takes about **20 minutes**, nearly all of it fetching the weights and pushing the
+image. Later builds read the previous `:latest` as a layer cache, and because the
 weights sit below `handler.py` in the Dockerfile, a handler change rebuilds and uploads only
 the final layer.
 
@@ -61,20 +65,30 @@ volume.
 
 ## What is in the image
 
-Weights, ~35 GiB, from the Comfy-Org repackages (Apache 2.0, no HF token needed):
+Weights, ~45 GiB:
 
-| File | Directory | Size |
-| --- | --- | --- |
-| `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` | `diffusion_models/` | 13.31 GiB |
-| `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` | `diffusion_models/` | 13.31 GiB |
-| `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `text_encoders/` | 6.27 GiB |
-| `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` | `loras/` | 1.14 GiB |
-| `wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors` | `loras/` | 1.14 GiB |
-| `wan_2.1_vae.safetensors` | `vae/` | 0.24 GiB |
+| File | Directory | Size | Source |
+| --- | --- | --- | --- |
+| `dasiwa_truevision_snatchkiss_v11_high.safetensors` | `diffusion_models/` | 18.12 GiB | Civitai |
+| `dasiwa_truevision_snatchkiss_v11_low.safetensors` | `diffusion_models/` | 18.12 GiB | Civitai |
+| `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `text_encoders/` | 6.27 GiB | Comfy-Org |
+| `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` | `loras/` | 1.14 GiB | Comfy-Org |
+| `wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors` | `loras/` | 1.14 GiB | Comfy-Org |
+| `wan_2.1_vae.safetensors` | `vae/` | 0.24 GiB | Comfy-Org |
+
+The experts are the [DaSiWa TrueVision v11](https://civitai.com/models/2272580) fine-tune rather
+than the stock Comfy-Org checkpoints. **TrueVision is non-distilled, which is what this pipeline
+wants** — the 8-step sampling comes from the lightx2v LoRAs layered on top, so the LoRAs stay.
+The sibling "Lightspeed" line has the distillation pre-merged and would need them removed, or
+you get the over-distill signature: flat contrast and a barely-moving subject.
 
 Wan 2.2 is a mixture of experts: the high-noise expert handles early steps and global
 composition, the low-noise one the later steps. Both are needed, and a LoRA generally has to be
-applied to each separately. The lightx2v distill LoRAs are what make 4-step sampling viable.
+applied to each separately.
+
+Swapping the checkpoint means editing the two Civitai ids in the Dockerfile and the `unet_name`
+on the workflow's two `UNETLoader` nodes. Bump `IMAGE_TAG` at the same time — the previous tag
+keeps its own weights in GHCR, so reverting is repointing the endpoint, not rebuilding.
 
 Custom nodes — a network volume cannot supply these, so they have to be in the image:
 

@@ -20,8 +20,10 @@ on:
 env:
   REGISTRY: ghcr.io
   # Change this per model build, alongside the weights in the Dockerfile.
-  # Every build also pushes :latest, so pin each endpoint to its own tag.
-  IMAGE_TAG: wan2.2-i2v
+  # Every build also pushes :latest, so pin each endpoint to its own tag —
+  # :wan2.2-i2v still holds the stock Comfy-Org weights, so rolling back is
+  # repointing the endpoint rather than rebuilding.
+  IMAGE_TAG: dasiwa-truevision-v11
 
 jobs:
   build-and-push:
@@ -88,6 +90,10 @@ jobs:
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:latest
           cache-to: type=inline
+          # The checkpoints come from Civitai, which needs a bearer token. Same
+          # secret-mount pattern as the krea2 worker; it never lands in a layer.
+          secrets: |
+            CIVITAI_TOKEN=${{ secrets.CIVITAI_TOKEN }}
 
       - name: Disk space after build
         if: always()
