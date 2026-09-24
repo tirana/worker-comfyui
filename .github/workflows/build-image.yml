@@ -23,7 +23,7 @@ env:
   # Every build also pushes :latest, so pin each endpoint to its own tag —
   # :wan2.2-i2v still holds the stock Comfy-Org weights, so rolling back is
   # repointing the endpoint rather than rebuilding.
-  IMAGE_TAG: dasiwa-truevision-v11
+  IMAGE_TAG: dasiwa-truevision-v10
 
 jobs:
   build-and-push:

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Wan 2.2 image-to-video worker for RunPod serverless.
 #
-# One image, one job. Weights are baked in (~45 GiB) so a warm host loads them
+# One image, one job. Weights are baked in (~36 GiB) so a warm host loads them
 # from local NVMe; the network volume is still read for extra LoRAs, see README.
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
@@ -68,7 +68,7 @@ RUN mkdir -p /comfyui/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/rife \
 # the build here, instead of as a "server not reachable" error on a live worker.
 RUN cd /comfyui && timeout 300 python main.py --quick-test-for-ci --cpu
 
-# Weights, ~45 GiB. One download per layer so a failed fetch doesn't invalidate
+# Weights, ~36 GiB. One download per layer so a failed fetch doesn't invalidate
 # the others. The two 14B experts are a mixture-of-experts pair — high noise for
 # the early steps and global composition, low noise for the rest — and the
 # workflow needs both.
@@ -78,23 +78,29 @@ RUN mkdir -p models/diffusion_models models/text_encoders models/loras models/va
 ARG WAN22=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
 ARG WAN21=https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files
 
-# The two experts are the DaSiWa TrueVision v11 (SnatchKiss) fine-tune rather
+# The two experts are the DaSiWa TrueVision v10 (BoundBite) fine-tune rather
 # than the stock Comfy-Org checkpoints, pulled from Civitai with a build secret.
-# TrueVision is NON-distilled, which is what this workflow wants: the 8-step
-# sampling comes from the lightx2v LoRAs applied on top, further down. The
-# distilled "Lightspeed" line would need those LoRAs removed.
+# TrueVision is the non-distilled line, so the lightx2v LoRAs further down still
+# apply and the 8-step sampling in the workflow is unchanged. Its own release
+# notes call out "mixed distillation experts" and stable motion, which is why
+# v10 suits a low step count better than v11.
 #
-# 18.12 GiB each — v11 is fp8-mixed and keeps more layers at bf16 than the
-# stock fp8_scaled files did, which is where the extra size goes.
+# v10 is 13.53 GiB per expert. v11 (SnatchKiss) is 18.12 GiB because it is
+# fp8-mixed, and baking it overflows the ~101 GB a GitHub runner can assemble:
+# BuildKit holds both the layer and its incompressible push blob, so peak is
+# roughly twice the image. Keep the image under ~50 GB or move weights to the
+# network volume.
+#   High: https://civitai.com/api/download/models/2769496?fileId=2656308
+#   Low:  https://civitai.com/api/download/models/2769497?fileId=2658992
 RUN --mount=type=secret,id=CIVITAI_TOKEN \
     curl -L -f -H "Authorization: Bearer $(cat /run/secrets/CIVITAI_TOKEN)" \
-      "https://civitai.com/api/download/models/2959309?fileId=2841257" \
-      -o models/diffusion_models/dasiwa_truevision_snatchkiss_v11_high.safetensors
+      "https://civitai.com/api/download/models/2769496?fileId=2656308" \
+      -o models/diffusion_models/dasiwa_truevision_boundbite_v10_high.safetensors
 
 RUN --mount=type=secret,id=CIVITAI_TOKEN \
     curl -L -f -H "Authorization: Bearer $(cat /run/secrets/CIVITAI_TOKEN)" \
-      "https://civitai.com/api/download/models/2959520?fileId=2840642" \
-      -o models/diffusion_models/dasiwa_truevision_snatchkiss_v11_low.safetensors
+      "https://civitai.com/api/download/models/2769497?fileId=2658992" \
+      -o models/diffusion_models/dasiwa_truevision_boundbite_v10_low.safetensors
 
 RUN wget -q -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors \
       ${WAN21}/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
@@ -109,7 +115,7 @@ RUN wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safete
 RUN wget -q -O models/vae/wan_2.1_vae.safetensors ${WAN22}/vae/wan_2.1_vae.safetensors
 
 # Lets ComfyUI also read models from a mounted network volume, for LoRAs you
-# want to swap without rebuilding 45 GiB.
+# want to swap without rebuilding 36 GiB.
 ADD src/extra_model_paths.yaml ./
 
 WORKDIR /

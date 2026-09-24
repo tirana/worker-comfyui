@@ -65,22 +65,33 @@ volume.
 
 ## What is in the image
 
-Weights, ~45 GiB:
+Weights, ~36 GiB:
 
 | File | Directory | Size | Source |
 | --- | --- | --- | --- |
-| `dasiwa_truevision_snatchkiss_v11_high.safetensors` | `diffusion_models/` | 18.12 GiB | Civitai |
-| `dasiwa_truevision_snatchkiss_v11_low.safetensors` | `diffusion_models/` | 18.12 GiB | Civitai |
+| `dasiwa_truevision_boundbite_v10_high.safetensors` | `diffusion_models/` | 13.53 GiB | Civitai |
+| `dasiwa_truevision_boundbite_v10_low.safetensors` | `diffusion_models/` | 13.53 GiB | Civitai |
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `text_encoders/` | 6.27 GiB | Comfy-Org |
 | `wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors` | `loras/` | 1.14 GiB | Comfy-Org |
 | `wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors` | `loras/` | 1.14 GiB | Comfy-Org |
 | `wan_2.1_vae.safetensors` | `vae/` | 0.24 GiB | Comfy-Org |
 
-The experts are the [DaSiWa TrueVision v11](https://civitai.com/models/2272580) fine-tune rather
-than the stock Comfy-Org checkpoints. **TrueVision is non-distilled, which is what this pipeline
-wants** — the 8-step sampling comes from the lightx2v LoRAs layered on top, so the LoRAs stay.
-The sibling "Lightspeed" line has the distillation pre-merged and would need them removed, or
-you get the over-distill signature: flat contrast and a barely-moving subject.
+The experts are [DaSiWa TrueVision v10 "BoundBite"](https://civitai.com/models/2272580) rather
+than the stock Comfy-Org checkpoints. TrueVision is the non-distilled line, so the lightx2v
+LoRAs layered on top still apply and the workflow's 8-step sampling is unchanged. The sibling
+"Lightspeed" line has distillation pre-merged and would need those LoRAs removed, or you get the
+over-distill signature: flat contrast and a barely-moving subject.
+
+Note that TrueVision is *designed* for 20-30 step LoRA-free generation — its own description says
+so. Running it at 8 steps with lightx2v works, but trades away much of what the line is for. v10
+is the version that suits a low step count best; its notes cite mixed distillation experts and
+stable motion.
+
+**Size is the constraint on which version you can bake.** v11 "SnatchKiss" is 18.12 GiB per
+expert (fp8-mixed) instead of 13.53, which takes the image past what CI can build — BuildKit
+holds each layer *and* its incompressible push blob, so peak is about twice the image against
+the ~101 GB a runner can assemble. Keep the image under ~50 GB, or put the experts on the
+network volume.
 
 Wan 2.2 is a mixture of experts: the high-noise expert handles early steps and global
 composition, the low-noise one the later steps. Both are needed, and a LoRA generally has to be
