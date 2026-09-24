@@ -1,7 +1,8 @@
 name: Build and Push Image
 
-# Builds on every push to main, like the krea2 worker. Doc-only commits are
-# excluded: this image is ~45 GB and a README typo is not worth a rebuild.
+# Builds every checkpoint variant on push to main, one runner each. Doc-only
+# commits are excluded: these images are ~45 GB and a README typo is not worth
+# two rebuilds.
 on:
   push:
     branches: ["main"]
@@ -11,19 +12,9 @@ on:
       - ".gitignore"
       - "tests/**"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Override the image tag (defaults to IMAGE_TAG below)"
-        required: false
-        type: string
 
 env:
   REGISTRY: ghcr.io
-  # Change this per model build, alongside the weights in the Dockerfile.
-  # Every build also pushes :latest, so pin each endpoint to its own tag —
-  # :wan2.2-i2v still holds the stock Comfy-Org weights, so rolling back is
-  # repointing the endpoint rather than rebuilding.
-  IMAGE_TAG: dasiwa-truevision-v10
 
 jobs:
   build-and-push:
@@ -31,6 +22,22 @@ jobs:
     permissions:
       contents: read
       packages: write
+
+    # One variant per runner, because each needs the whole ~101 GB of scratch
+    # space to itself. Add a row to build another checkpoint alongside these;
+    # every tag keeps its own image in GHCR, so A/B is repointing the endpoint.
+    # No :latest — with several variants a moving tag is only a way to
+    # accidentally repoint a working endpoint.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            tag: dasiwa-truevision-v10
+          - dockerfile: Dockerfile.lightspeed-v11
+            tag: dasiwa-lightspeed-v11
+
+    name: ${{ matrix.tag }}
 
     steps:
       # ~45 GB of layers plus their (incompressible) push blobs is ~90 GB at
@@ -82,13 +89,12 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}:${{ inputs.tag || env.IMAGE_TAG }}
-            ${{ env.REGISTRY }}/${{ github.repository }}:latest
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.tag }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:latest
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.tag }}
           cache-to: type=inline
           # The checkpoints come from Civitai, which needs a bearer token. Same
           # secret-mount pattern as the krea2 worker; it never lands in a layer.

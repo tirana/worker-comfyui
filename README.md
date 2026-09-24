@@ -15,11 +15,24 @@ Two differences from upstream:
 
 ## Build
 
-The [`Build and Push Image`](.github/workflows/build-image.yml) workflow builds on every push
-to `main` and pushes to
-[GHCR](https://github.com/tirana/worker-comfyui/pkgs/container/worker-comfyui), tagged
-`wan2.2-i2v` and `latest`. Doc-only commits are skipped via `paths-ignore`; you can also run it
-by hand with a tag override.
+The [`Build and Push Image`](.github/workflows/build-image.yml) workflow builds every
+checkpoint variant on each push to `main`, one runner per variant, and pushes to
+[GHCR](https://github.com/tirana/worker-comfyui/pkgs/container/worker-comfyui):
+
+| Tag | Dockerfile | Checkpoint | Steps / CFG |
+| --- | --- | --- | --- |
+| `dasiwa-truevision-v10` | [`Dockerfile`](Dockerfile) | TrueVision v10 BoundBite + lightx2v LoRAs | 8 / 4 |
+| `dasiwa-lightspeed-v11` | [`Dockerfile.lightspeed-v11`](Dockerfile.lightspeed-v11) | Lightspeed v11 SnatchKiss, distilled | 4 / 1 |
+
+Adding a variant is a row in the matrix plus a Dockerfile. Each tag keeps its own image, so
+comparing them is repointing the endpoint — no rebuild. There is deliberately no `:latest`:
+with several variants a moving tag is only a way to repoint a working endpoint by accident.
+Doc-only commits are skipped via `paths-ignore`.
+
+**The two are not interchangeable at the same settings.** Lightspeed has the distillation
+trained in, so it runs at 4 steps / CFG 1 with no speed LoRA; feeding it TrueVision's 8 steps and
+CFG 4 gives burnt, motionless output. Its author also specifies euler with simple or
+linear_quadratic and sigma shift 5.
 
 The build needs a **`CIVITAI_TOKEN`** repository secret (Settings → Secrets and variables →
 Actions), since the checkpoints are fetched from Civitai with a bearer token. It is passed
